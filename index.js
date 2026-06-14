@@ -62,11 +62,13 @@ function buildJob(body, company) {
     companyId: toText(body.companyId),
     companyName: company?.name?.trim() || toText(body.companyName),
     companyLogo: company?.logo?.trim() || toText(body.companyLogo),
+    companyWebsite: company?.websiteUrl?.trim() || toText(body.companyWebsite),
     companyPlan: toText(body.companyPlan),
     company: {
       id: toText(body.companyId),
       name: company?.name?.trim() || toText(body.companyName),
       logo: company?.logo?.trim() || toText(body.companyLogo),
+      websiteUrl: company?.websiteUrl?.trim() || toText(body.companyWebsite),
       plan: toText(body.companyPlan),
     },
     recruiterId: toText(body.recruiterId),
@@ -77,6 +79,41 @@ function buildJob(body, company) {
   };
 }
 
+function buildApplication(body, job) {
+  const now = new Date();
+  const seekerId = toText(body.seekerId);
+  const jobId = job._id.toString();
+
+  return {
+    seekerId,
+    jobId,
+    userInfo: {
+      id: seekerId,
+      name: toText(body.fullName),
+      email: toText(body.email),
+    },
+    jobInfo: {
+      id: jobId,
+      title: job.jobTitle || job.title || 'Untitled job',
+      companyName: job.companyName || job.company?.name || 'N/A',
+      category: job.category || 'N/A',
+      jobType: job.jobType || 'N/A',
+      location: job.location || (job.isRemote ? 'Remote' : 'N/A'),
+      recruiterId: job.recruiterId || '',
+    },
+    applicationInfo: {
+      fullName: toText(body.fullName),
+      email: toText(body.email),
+      resumeLink: toText(body.resumeLink),
+      portfolioLink: toText(body.portfolioLink),
+      message: toText(body.message),
+    },
+    status: 'submitted',
+    appliedAt: now,
+    createdAt: now,
+  };
+}
+
 async function run() {
   try {
     await client.connect();
@@ -84,6 +121,7 @@ async function run() {
     const database = client.db(process.env.DATABASE_NAME);
     const jobsCollection = database.collection('jobs');
     const companiesCollection = database.collection('companies');
+    const applicationsCollection = database.collection('applications');
 
 
 
@@ -256,6 +294,76 @@ async function run() {
         return res.json(jobs);
       } catch (error) {
         console.error('Failed to load recruiter jobs', error);
+        return res.status(500).json([]);
+      }
+    });
+
+    app.post('/applications', async (req, res) => {
+      try {
+        const body = req.body || {};
+        const requiredFields = ['seekerId', 'jobId', 'fullName', 'email', 'resumeLink'];
+        const missingField = requiredFields.find((field) => !toText(body[field]));
+
+        if (missingField) {
+          return res.status(400).json({ message: `${missingField} is required.` });
+        }
+
+        if (!ObjectId.isValid(toText(body.jobId))) {
+          return res.status(400).json({ message: 'Invalid job id.' });
+        }
+
+        const job = await jobsCollection.findOne({
+          _id: new ObjectId(toText(body.jobId)),
+          status: 'active',
+        });
+
+        if (!job) {
+          return res.status(404).json({ message: 'Job not found.' });
+        }
+
+        const oldApplication = await applicationsCollection.findOne({
+          seekerId: toText(body.seekerId),
+          jobId: toText(body.jobId),
+        });
+
+        if (oldApplication) {
+          return res.status(409).json({
+            message: 'You already applied for this job.',
+          });
+        }
+
+        const application = buildApplication(body, job);
+        const result = await applicationsCollection.insertOne(application);
+
+        return res.status(201).json({
+          message: 'Application submitted successfully.',
+          applicationId: result.insertedId.toString(),
+          application,
+        });
+      } catch (error) {
+        console.error('Failed to submit application', error);
+        return res.status(500).json({
+          message: 'Something went wrong while submitting the application.',
+        });
+      }
+    });
+
+    app.get('/applications/seeker/:seekerId', async (req, res) => {
+      try {
+        const seekerId = toText(req.params.seekerId);
+
+        if (!seekerId) {
+          return res.status(400).json({ message: 'seekerId is required.' });
+        }
+
+        const applications = await applicationsCollection
+          .find({ seekerId })
+          .sort({ appliedAt: -1, _id: -1 })
+          .toArray();
+
+        return res.json(applications);
+      } catch (error) {
+        console.error('Failed to load applications', error);
         return res.status(500).json([]);
       }
     });
