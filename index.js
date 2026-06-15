@@ -34,6 +34,22 @@ function toBoolean(value) {
   return value === true || value === 'true' || value === 'on';
 }
 
+function buildUserLookupFilters(userId) {
+  const filters = [];
+  const textUserId = toText(userId);
+
+  if (!textUserId) {
+    return filters;
+  }
+
+  filters.push({ seekerId: textUserId });
+  filters.push({ recruiterId: textUserId });
+  filters.push({ 'userInfo.id': textUserId });
+  filters.push({ 'jobInfo.recruiterId': textUserId });
+
+  return filters;
+}
+
 function buildJob(body, company) {
   const now = new Date();
   const minSalary = Number(body.minSalary);
@@ -70,6 +86,7 @@ function buildJob(body, company) {
       logo: company?.logo?.trim() || toText(body.companyLogo),
       websiteUrl: company?.websiteUrl?.trim() || toText(body.companyWebsite),
       plan: toText(body.companyPlan),
+      recruiterId: toText(body.recruiterId),
     },
     recruiterId: toText(body.recruiterId),
     status: 'active',
@@ -114,6 +131,29 @@ function buildApplication(body, job) {
   };
 }
 
+function buildPlanPurchase(body) {
+  const now = new Date();
+
+  return {
+    userId: toText(body.userId),
+    userName: toText(body.userName),
+    userEmail: toText(body.userEmail),
+    role: toText(body.role),
+    planId: toText(body.planId),
+    planName: toText(body.planName),
+    stripeSessionId: toText(body.stripeSessionId),
+    stripeCustomerId: toText(body.stripeCustomerId),
+    stripeSubscriptionId: toText(body.stripeSubscriptionId),
+    amountTotal: Number(body.amountTotal || 0),
+    currency: toText(body.currency),
+    paymentStatus: toText(body.paymentStatus),
+    planStartedAt: body.planStartedAt ? new Date(body.planStartedAt) : now,
+    planExpiresAt: body.planExpiresAt ? new Date(body.planExpiresAt) : null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 async function run() {
   try {
     await client.connect();
@@ -122,6 +162,7 @@ async function run() {
     const jobsCollection = database.collection('jobs');
     const companiesCollection = database.collection('companies');
     const applicationsCollection = database.collection('applications');
+    const plansCollection = database.collection('plansCollection');
 
 
 
@@ -286,7 +327,10 @@ async function run() {
         const jobs = await jobsCollection
           .find({
             status,
-            recruiterId,
+            $or: [
+              { recruiterId },
+              { 'company.recruiterId': recruiterId },
+            ],
           })
           .sort({ createdAt: -1, _id: -1 })
           .toArray();
@@ -348,16 +392,56 @@ async function run() {
       }
     });
 
+    app.post('/plans', async (req, res) => {
+      try {
+        const body = req.body || {};
+        const requiredFields = ['userId', 'role', 'planId', 'planName', 'stripeSessionId'];
+        const missingField = requiredFields.find((field) => !toText(body[field]));
+
+        if (missingField) {
+          return res.status(400).json({ message: `${missingField} is required.` });
+        }
+
+        const planPurchase = buildPlanPurchase(body);
+
+        await plansCollection.updateOne(
+          { stripeSessionId: planPurchase.stripeSessionId },
+          { $setOnInsert: planPurchase },
+          { upsert: true }
+        );
+
+        return res.status(201).json({
+          message: 'Plan information saved successfully.',
+          plan: planPurchase,
+        });
+      } catch (error) {
+        console.error('Failed to save plan information', error);
+        return res.status(500).json({
+          message: 'Something went wrong while saving the plan information.',
+        });
+      }
+    });
+
     app.get('/applications/seeker/:seekerId', async (req, res) => {
       try {
         const seekerId = toText(req.params.seekerId);
+        const seekerEmail = toText(req.query.email);
 
         if (!seekerId) {
           return res.status(400).json({ message: 'seekerId is required.' });
         }
 
+        const filters = buildUserLookupFilters(seekerId);
+
+        if (seekerEmail) {
+          filters.push({ 'userInfo.email': seekerEmail });
+          filters.push({ 'applicationInfo.email': seekerEmail });
+        }
+
         const applications = await applicationsCollection
-          .find({ seekerId })
+          .find({
+            $or: filters,
+          })
           .sort({ appliedAt: -1, _id: -1 })
           .toArray();
 
