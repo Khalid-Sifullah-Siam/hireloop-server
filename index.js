@@ -19,7 +19,7 @@ const allowedOrigins = [
   process.env.CLIENT_URL,
   process.env.FRONTEND_URL,
   process.env.BETTER_AUTH_URL,
-  'http://localhost:3000',
+  'https://hireloop-client-six.vercel.app',
 ].map(toText).filter(Boolean);
 
 app.use(cors({
@@ -200,7 +200,7 @@ function getClientOrigin(req, body = {}) {
     toText(process.env.CLIENT_URL) ||
     toText(process.env.FRONTEND_URL) ||
     toText(process.env.BETTER_AUTH_URL) ||
-    'http://localhost:3000'
+    'https://hireloop-client-six.vercel.app'
   );
 }
 
