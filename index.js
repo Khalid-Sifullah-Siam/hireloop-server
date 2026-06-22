@@ -15,12 +15,7 @@ const stripeSecretKey = toText(process.env.STRIPE_SECRET_KEY);
 const stripe = stripeSecretKey
   ? new Stripe(stripeSecretKey)
   : null;
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  process.env.FRONTEND_URL,
-  process.env.BETTER_AUTH_URL,
-  'https://hireloop-client-six.vercel.app',
-].map(toText).filter(Boolean);
+const allowedOrigins = getAllowedOrigins();
 
 app.use(cors({
   origin(origin, callback) {
@@ -64,6 +59,21 @@ const planPriceIds = {
 
 function toText(value) {
   return String(value || '').trim();
+}
+
+function getAllowedOrigins() {
+  const origins = [
+    process.env.CLIENT_URL,
+    process.env.FRONTEND_URL,
+    process.env.BETTER_AUTH_URL,
+    'https://hireloop-client-six.vercel.app',
+  ];
+
+  if (process.env.VERCEL_URL) {
+    origins.push(`https://${toText(process.env.VERCEL_URL)}`);
+  }
+
+  return origins.map(toText).filter(Boolean);
 }
 
 function toBoolean(value) {
