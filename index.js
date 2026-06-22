@@ -240,6 +240,22 @@ function buildUserFilters(user) {
   return filters;
 }
 
+function buildPlanPaymentFilters(user) {
+  const filters = [];
+  const userId = toText(user?.id || user?.userId);
+  const userEmail = toText(user?.email || user?.userEmail);
+
+  if (userId) {
+    filters.push({ userId });
+  }
+
+  if (userEmail) {
+    filters.push({ userEmail });
+  }
+
+  return filters;
+}
+
 function buildUserIdFilters(userId) {
   const textUserId = toText(userId);
   const filters = [];
@@ -482,6 +498,22 @@ function normalizeJobDocument(job) {
   };
 }
 
+function getAdminJobView(job) {
+  if (!job?.pendingUpdate) {
+    return job;
+  }
+
+  return {
+    ...job,
+    ...job.pendingUpdate,
+    _id: job._id,
+    status: job.status,
+    pendingUpdate: job.pendingUpdate,
+    isPendingUpdate: true,
+    originalTitle: job.jobTitle || job.title,
+  };
+}
+
 function buildApplication(body, job) {
   const now = new Date();
   const seekerId = toText(body.seekerId);
@@ -547,6 +579,7 @@ async function run() {
     const jobsCollection = database.collection('jobs');
     const companiesCollection = database.collection('companies');
     const applicationsCollection = database.collection('applications');
+    const savedJobsCollection = database.collection('savedJobs');
     const plansCollection = database.collection('plansCollection');
     const usersCollection = database.collection('user');
 
@@ -822,6 +855,33 @@ async function run() {
           status: 'pending',
         }, company);
 
+        delete job._id;
+
+        if (toText(existingJob.status).toLowerCase() === 'approved') {
+          await jobsCollection.updateOne(
+            { _id: new ObjectId(jobId) },
+            {
+              $set: {
+                status: 'pending',
+                previousStatus: 'approved',
+                pendingUpdate: {
+                  ...job,
+                  createdAt: existingJob.createdAt || job.createdAt,
+                  updatedAt: new Date(),
+                },
+                updatedAt: new Date(),
+              },
+            }
+          );
+
+          const savedJob = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
+
+          return res.json({
+            message: 'Job update sent for admin approval.',
+            job: normalizeJobDocument(savedJob),
+          });
+        }
+
         await jobsCollection.updateOne(
           { _id: new ObjectId(jobId) },
           {
@@ -1052,6 +1112,10 @@ async function run() {
 
         const application = buildApplication(body, job);
         const result = await applicationsCollection.insertOne(application);
+        await savedJobsCollection.deleteOne({
+          seekerId: toText(body.seekerId),
+          jobId: toText(body.jobId),
+        });
 
         return res.status(201).json({
           message: 'Application submitted successfully.',
@@ -1063,6 +1127,212 @@ async function run() {
         return res.status(500).json({
           message: 'Something went wrong while submitting the application.',
         });
+      }
+    });
+
+    app.get('/applications/job/:jobId', requireAuth(['recruiter']), async (req, res) => {
+      try {
+        const jobId = toText(req.params.jobId);
+
+        if (!ObjectId.isValid(jobId)) {
+          return res.status(400).json({ message: 'Invalid job id.' });
+        }
+
+        const job = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
+
+        if (!job) {
+          return res.status(404).json({ message: 'Job not found.' });
+        }
+
+        const ownerId = toText(job.recruiterId || job.company?.recruiterId);
+
+        if (ownerId !== req.auth.userId) {
+          return res.status(403).json({ message: 'You can only view applications for your own jobs.' });
+        }
+
+        const applications = await applicationsCollection
+          .find({ jobId })
+          .sort({ appliedAt: -1, _id: -1 })
+          .toArray();
+
+        return res.json(applications.map((application) => ({
+          ...application,
+          _id: application._id?.toString(),
+        })));
+      } catch (error) {
+        console.error('Failed to load job applications', error);
+        return res.status(500).json([]);
+      }
+    });
+
+    app.patch('/applications/:applicationId/status', requireAuth(['recruiter']), requireActiveAccount, async (req, res) => {
+      try {
+        const applicationId = toText(req.params.applicationId);
+        const nextStatus = toText(req.body?.status).toLowerCase();
+        const allowedStatuses = ['interview', 'rejected', 'hired'];
+
+        if (!ObjectId.isValid(applicationId)) {
+          return res.status(400).json({ message: 'Invalid application id.' });
+        }
+
+        if (!allowedStatuses.includes(nextStatus)) {
+          return res.status(400).json({ message: 'Invalid application status.' });
+        }
+
+        const application = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+
+        if (!application) {
+          return res.status(404).json({ message: 'Application not found.' });
+        }
+
+        const jobId = toText(application.jobId || application.jobInfo?.id);
+
+        if (!ObjectId.isValid(jobId)) {
+          return res.status(400).json({ message: 'Invalid job id.' });
+        }
+
+        const job = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
+
+        if (!job) {
+          return res.status(404).json({ message: 'Job not found.' });
+        }
+
+        const ownerId = toText(job.recruiterId || job.company?.recruiterId);
+
+        if (ownerId !== req.auth.userId) {
+          return res.status(403).json({ message: 'You can only update applications for your own jobs.' });
+        }
+
+        const currentStatus = toText(application.status).toLowerCase();
+        const canMoveToInterview = ['applied', 'submitted', 'review'].includes(currentStatus) && nextStatus === 'interview';
+        const canRejectBeforeInterview = ['applied', 'submitted', 'review'].includes(currentStatus) && nextStatus === 'rejected';
+        const canFinishInterview = currentStatus === 'interview' && ['hired', 'rejected'].includes(nextStatus);
+
+        if (!canMoveToInterview && !canRejectBeforeInterview && !canFinishInterview) {
+          return res.status(400).json({ message: 'This status change is not allowed.' });
+        }
+
+        await applicationsCollection.updateOne(
+          { _id: new ObjectId(applicationId) },
+          {
+            $set: {
+              status: nextStatus,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        const updatedApplication = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+
+        return res.json({
+          message: 'Application status updated successfully.',
+          application: {
+            ...updatedApplication,
+            _id: updatedApplication._id?.toString(),
+          },
+        });
+      } catch (error) {
+        console.error('Failed to update application status', error);
+        return res.status(500).json({ message: 'Something went wrong while updating the application.' });
+      }
+    });
+
+    app.get('/saved-jobs/seeker/:seekerId', requireAuth(['seeker']), async (req, res) => {
+      try {
+        const seekerId = toText(req.params.seekerId);
+
+        if (!isSameUser(req.auth, seekerId, req.query.email)) {
+          return res.status(403).json({ message: 'You can only view your own saved jobs.' });
+        }
+
+        const savedJobs = await savedJobsCollection
+          .find({ seekerId })
+          .sort({ savedAt: -1, _id: -1 })
+          .toArray();
+
+        return res.json(savedJobs);
+      } catch (error) {
+        console.error('Failed to load saved jobs', error);
+        return res.status(500).json([]);
+      }
+    });
+
+    app.post('/saved-jobs', requireAuth(['seeker']), requireActiveAccount, async (req, res) => {
+      try {
+        const body = req.body || {};
+        const seekerId = req.auth.userId;
+        const jobId = toText(body.jobId);
+
+        if (!ObjectId.isValid(jobId)) {
+          return res.status(400).json({ message: 'Invalid job id.' });
+        }
+
+        const oldApplication = await applicationsCollection.findOne({ seekerId, jobId });
+
+        if (oldApplication) {
+          return res.status(409).json({ message: 'You already applied for this job.' });
+        }
+
+        const job = await jobsCollection.findOne({
+          _id: new ObjectId(jobId),
+          status: 'approved',
+        });
+
+        if (!job) {
+          return res.status(404).json({ message: 'Job not found.' });
+        }
+
+        const now = new Date();
+        const savedJob = {
+          seekerId,
+          seekerEmail: req.auth.email || '',
+          jobId,
+          jobInfo: {
+            id: jobId,
+            title: job.jobTitle || job.title || 'Untitled job',
+            companyName: job.companyName || job.company?.name || 'N/A',
+            category: job.category || 'N/A',
+            jobType: job.jobType || 'N/A',
+            location: job.location || (job.isRemote ? 'Remote' : 'N/A'),
+            deadline: job.deadline || job.applicationDeadline || null,
+          },
+          savedAt: now,
+          updatedAt: now,
+        };
+
+        await savedJobsCollection.updateOne(
+          { seekerId, jobId },
+          { $set: savedJob, $setOnInsert: { createdAt: now } },
+          { upsert: true }
+        );
+
+        return res.status(201).json({
+          message: 'Job saved successfully.',
+          savedJob,
+        });
+      } catch (error) {
+        console.error('Failed to save job', error);
+        return res.status(500).json({ message: 'Something went wrong while saving the job.' });
+      }
+    });
+
+    app.delete('/saved-jobs/:jobId', requireAuth(['seeker']), async (req, res) => {
+      try {
+        const jobId = toText(req.params.jobId);
+
+        if (!ObjectId.isValid(jobId)) {
+          return res.status(400).json({ message: 'Invalid job id.' });
+        }
+
+        await savedJobsCollection.deleteOne({
+          seekerId: req.auth.userId,
+          jobId,
+        });
+
+        return res.json({ message: 'Saved job removed successfully.' });
+      } catch (error) {
+        console.error('Failed to remove saved job', error);
+        return res.status(500).json({ message: 'Something went wrong while removing the saved job.' });
       }
     });
 
@@ -1100,6 +1370,56 @@ async function run() {
         return res.status(500).json({
           message: 'Something went wrong while saving the plan information.',
         });
+      }
+    });
+
+    app.get('/plans/payments', requireAuth(['admin']), async (req, res) => {
+      try {
+        const payments = await plansCollection
+          .find({})
+          .sort({ createdAt: -1, _id: -1 })
+          .toArray();
+
+        return res.json(payments.map((payment) => ({
+          ...payment,
+          _id: payment._id?.toString(),
+        })));
+      } catch (error) {
+        console.error('Failed to load payment details', error);
+        return res.status(500).json([]);
+      }
+    });
+
+    app.get('/plans/user/:userId', requireAuth(['seeker', 'recruiter', 'admin']), async (req, res) => {
+      try {
+        const userId = toText(req.params.userId);
+        const userEmail = toText(req.query.email);
+
+        if (req.auth.role !== 'admin' && !isSameUser(req.auth, userId, userEmail)) {
+          return res.status(403).json({ message: 'You can only view your own billing information.' });
+        }
+
+        const filters = buildPlanPaymentFilters({
+          id: userId,
+          email: userEmail,
+        });
+
+        if (filters.length === 0) {
+          return res.json([]);
+        }
+
+        const payments = await plansCollection
+          .find({ $or: filters })
+          .sort({ createdAt: -1, _id: -1 })
+          .toArray();
+
+        return res.json(payments.map((payment) => ({
+          ...payment,
+          _id: payment._id?.toString(),
+        })));
+      } catch (error) {
+        console.error('Failed to load user billing information', error);
+        return res.status(500).json([]);
       }
     });
 
@@ -1306,6 +1626,112 @@ async function run() {
       } catch (error) {
         console.error('Failed to load admin companies', error);
         return res.status(500).json([]);
+      }
+    });
+
+    app.patch('/users/profile', requireAuth(['seeker', 'recruiter']), requireActiveAccount, async (req, res) => {
+      try {
+        const body = req.body || {};
+        const filters = buildUserIdFilters(req.auth.userId);
+
+        if (filters.length === 0) {
+          return res.status(400).json({ message: 'User id is required.' });
+        }
+
+        const existingUser = await usersCollection.findOne({ $or: filters });
+
+        if (!existingUser) {
+          return res.status(404).json({ message: 'User was not found.' });
+        }
+
+        const name = toText(body.name || existingUser.name);
+        const email = toText(body.email || existingUser.email).toLowerCase();
+
+        const rawPhoto = body.photo !== undefined ? body.photo : body.image !== undefined ? body.image : body.avatar;
+        const rawAvatar = body.avatar !== undefined ? body.avatar : body.photo !== undefined ? body.photo : body.image;
+        const photo = toText(rawPhoto || existingUser.photo || existingUser.image || existingUser.avatar);
+        const avatar = toText(rawAvatar || existingUser.avatar || existingUser.photo || existingUser.image);
+        const headline = body.headline !== undefined ? toText(body.headline) : toText(existingUser.headline);
+        const bio = body.bio !== undefined ? toText(body.bio) : toText(existingUser.bio);
+        const skills = body.skills !== undefined
+          ? (Array.isArray(body.skills)
+              ? body.skills.map(toText).filter(Boolean)
+              : toText(body.skills).split(',').map(toText).filter(Boolean))
+          : existingUser.skills || [];
+
+        if (!name) {
+          return res.status(400).json({ message: 'Name is required.' });
+        }
+
+        if (!email) {
+          return res.status(400).json({ message: 'Email is required.' });
+        }
+
+        const sameEmailUser = await usersCollection.findOne({
+          email,
+          $nor: [
+            { id: req.auth.userId },
+            { _id: existingUser._id },
+          ],
+        });
+
+        if (sameEmailUser) {
+          return res.status(409).json({ message: 'This email is already used by another account.' });
+        }
+
+        const updateData = {
+          name,
+          email,
+          photo,
+          image: photo,
+          avatar,
+          headline,
+          bio,
+          skills,
+          updatedAt: new Date(),
+        };
+
+        await usersCollection.updateOne(
+          { $or: filters },
+          { $set: updateData }
+        );
+
+        const updatedUser = await usersCollection.findOne({ $or: filters });
+
+        return res.json({
+          message: 'Profile updated successfully.',
+          user: {
+            ...updatedUser,
+            _id: updatedUser._id?.toString(),
+          },
+        });
+      } catch (error) {
+        console.error('Failed to update profile', error);
+        return res.status(500).json({ message: 'Something went wrong while updating your profile.' });
+      }
+    });
+
+    app.get('/users/profile', requireAuth(['seeker', 'recruiter']), requireActiveAccount, async (req, res) => {
+      try {
+        const filters = buildUserIdFilters(req.auth.userId);
+
+        if (filters.length === 0) {
+          return res.status(400).json({ message: 'User id is required.' });
+        }
+
+        const user = await usersCollection.findOne({ $or: filters });
+
+        if (!user) {
+          return res.status(404).json({ message: 'User was not found.' });
+        }
+
+        return res.json({
+          ...user,
+          _id: user._id?.toString(),
+        });
+      } catch (error) {
+        console.error('Failed to load profile', error);
+        return res.status(500).json({ message: 'Something went wrong while loading your profile.' });
       }
     });
 
