@@ -38,6 +38,21 @@ app.get('/', (req, res) => {
   });
 });
 
+let databaseReadyPromise;
+
+// Wait for MongoDB and the database routes before handling API requests.
+app.use(async (req, res, next) => {
+  try {
+    await databaseReadyPromise;
+    next();
+  } catch (error) {
+    console.error('Database is not ready', error);
+    res.status(503).json({
+      message: 'Database connection is not ready. Please try again.',
+    });
+  }
+});
+
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -819,8 +834,6 @@ async function run() {
           });
         }
 
-
-
         
         const job = buildJob(body, company);
         const result = await jobsCollection.insertOne(job);
@@ -987,9 +1000,7 @@ async function run() {
         console.error('Failed to load all jobs', error);
         return res.status(500).json([]);
       }
-    }
-     
-    )
+    });
 
     app.get('/job/:id', async (req, res) => {
       try {
@@ -2161,8 +2172,15 @@ async function run() {
   }
 }
 
-run().catch(console.dir);
+databaseReadyPromise = run();
+databaseReadyPromise.catch(console.error);
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+// Vercel uses the exported Express app.
+module.exports = app;
+
+// Start a normal server when this file is run locally.
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`HireLoop server listening on port ${port}`);
+  });
+}
