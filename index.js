@@ -87,6 +87,12 @@ function toBoolean(value) {
   return value === true || value === 'true' || value === 'on';
 }
 
+function isPublicStatus(status) {
+  const normalizedStatus = toText(status).toLowerCase();
+
+  return !normalizedStatus || normalizedStatus === 'approved' || normalizedStatus === 'active';
+}
+
 function base64UrlEncode(value) {
   return Buffer.from(value)
     .toString('base64')
@@ -964,7 +970,15 @@ async function run() {
     app.get('/alljobs', async (req, res) => {
       try {
         const jobs = await jobsCollection
-          .find({ status: 'approved' })
+          .find({
+            $or: [
+              { status: { $regex: /^approved$/i } },
+              { status: { $regex: /^active$/i } },
+              { status: { $exists: false } },
+              { status: null },
+              { status: '' },
+            ],
+          })
           .sort({ createdAt: -1, _id: -1 })
           .toArray();
 
@@ -1013,7 +1027,7 @@ async function run() {
         );
         const canViewPrivateJob = authRole === 'admin' || isOwner;
 
-        if (jobStatus !== 'approved' && !canViewPrivateJob) {
+        if (!isPublicStatus(jobStatus) && !canViewPrivateJob) {
           return res.status(404).json({ message: 'Job not found.' });
         }
 
@@ -1572,7 +1586,15 @@ async function run() {
     app.get('/companies', async (req, res) => {
       try {
         const companies = await companiesCollection
-          .find({ status: 'approved' })
+          .find({
+            $or: [
+              { status: { $regex: /^approved$/i } },
+              { status: { $regex: /^active$/i } },
+              { status: { $exists: false } },
+              { status: null },
+              { status: '' },
+            ],
+          })
           .sort({ createdAt: -1 })
           .toArray();
 
